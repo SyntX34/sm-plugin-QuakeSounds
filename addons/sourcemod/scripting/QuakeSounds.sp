@@ -1,6 +1,7 @@
 #include <sourcemod>
 #include <sdktools>
 #include <clientprefs>
+#include <multicolors>
 
 #pragma semicolon 1
 #pragma newdecls required
@@ -14,17 +15,21 @@
 #define PATH_CONFIG_QUAKE_SET		"configs/quake/sets.cfg"
 #define PATH_CONFIG_QUAKE_SOUNDS	"configs/quake/sets"
 
+#define VOICE_MALE					0
+#define VOICE_FEMALE				1
+
 public Plugin myinfo = {
 	name = "Quake Sounds",
 	author = "Spartan_C001, maxime1907, .Rushaway",
 	description = "Plays sounds based on events that happen in game.",
-	version = "4.2.1",
+	version = "4.2.2",
 	url = "http://steamcommunity.com/id/spartan_c001/",
 }
 
 // Sound Sets
 int g_iNumSets = 0;
 char g_sSetsName[MAX_NUM_SETS][PLATFORM_MAX_PATH];
+char g_sVoiceGender[MAX_NUM_SETS][16];
 
 // Sound Files
 char headshotSound[MAX_NUM_SETS][MAX_NUM_KILLS][PLATFORM_MAX_PATH];
@@ -61,6 +66,8 @@ float g_fLastKillTime[MAXPLAYERS+1];
 // Preferences
 Handle g_hQuakeSettings = INVALID_HANDLE;
 int g_iShowText[MAXPLAYERS + 1] = {0, ...}, g_iSound[MAXPLAYERS + 1] = {0, ...}, g_iSoundPreset[MAXPLAYERS + 1] = {0, ...};
+float g_fClientVolume[MAXPLAYERS + 1] = {1.0, ...};
+int g_iVoiceGender[MAXPLAYERS + 1] = {VOICE_MALE, ...};
 
 ConVar g_cvar_Announce;
 ConVar g_cvar_Text;
@@ -71,6 +78,7 @@ ConVar g_cvar_TeamKillMode;
 ConVar g_cvar_ComboTime;
 ConVar g_cvar_SelfKill;
 ConVar g_cvar_TeamKill;
+ConVar g_cvar_DefaultGender;
 
 EngineVersion g_evGameEngine;
 
@@ -91,17 +99,26 @@ public void OnPluginStart()
 	g_cvar_Text = CreateConVar("sm_quakesounds_text", "1", "Default text display setting for new users, 0=Disabled, 1=Enabled.", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_cvar_Sound = CreateConVar("sm_quakesounds_sound", "1", "Default sound setting for new users, 0=Disable 1=Enable.", FCVAR_NONE, true, 0.0, true, 255.0);
 	g_cvar_SoundPreset = CreateConVar("sm_quakesounds_sound_preset", "1", "Default sound set for new users, 1-255=Preset by order in the config file.", FCVAR_NONE, true, 1.0, true, 255.0);
-	g_cvar_Volume = CreateConVar("sm_quakesounds_volume", "1.0", "Sound Volume: should be a number between 0.0 and 1.0.", FCVAR_NONE, true, 0.0, true, 1.0);
+	g_cvar_Volume = CreateConVar("sm_quakesounds_volume", "1.0", "Default sound volume for new users: should be a number between 0.0 and 1.0.", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_cvar_TeamKillMode = CreateConVar("sm_quakesounds_teamkill_mode", "0", "Teamkiller Mode; 0=Normal, 1=Team-Kills count as normal kills.", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_cvar_ComboTime = CreateConVar("sm_quakesounds_combo_time", "2.0", "Max time in seconds between kills to count as combo; 0.0=Minimum, 2.0=Default", FCVAR_NONE, true, 0.0);
 	g_cvar_SelfKill = CreateConVar("sm_quakesounds_selfkill", "1", "Enable/Disable selfkill sounds; 0=Disabled, 1=Enabled", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_cvar_TeamKill = CreateConVar("sm_quakesounds_teamkill", "1", "Enable/Disable teamkill sounds; 0=Disabled, 1=Enabled", FCVAR_NONE, true, 0.0, true, 1.0);
+	g_cvar_DefaultGender = CreateConVar("sm_quakesounds_default_gender", "0", "Default voice gender: 0=Male, 1=Female", FCVAR_NONE, true, 0.0, true, 1.0);
 
 	g_hQuakeSettings = RegClientCookie("quakesounds_settings", "Quake Sounds Settings", CookieAccess_Private);
 
 	SetCookieMenuItem(CookieMenu_QuakeSounds, INVALID_HANDLE, "Quake Sound Settings");
 
 	RegConsoleCmd("sm_quake", Command_QuakeSounds);
+	RegConsoleCmd("sm_qs", Command_QuakeSounds);
+	RegConsoleCmd("sm_quakesounds", Command_QuakeSounds);
+
+	// Add commands for quick settings
+	RegConsoleCmd("sm_quakevolume", Command_Volume);
+	RegConsoleCmd("sm_qsvolume", Command_Volume);
+	RegConsoleCmd("sm_quakevoice", Command_Voice);
+	RegConsoleCmd("sm_qsvoice", Command_Voice);
 
 	HookGameEvents();
 
@@ -174,6 +191,131 @@ public Action Command_QuakeSounds(int client, int args)
 	return Plugin_Handled;
 }
 
+public Action Command_Volume(int client, int args)
+{
+	if (client == 0)
+	{
+		PrintToServer("This command can only be used in-game.");
+		return Plugin_Handled;
+	}
+	
+	if (args < 1)
+	{
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Usage: !volume <0.0-1.0> or !volume <percentage>");
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Current volume: {lightgreen}%.1f%% {default}({lightgreen}%.2f{default})", g_fClientVolume[client] * 100, g_fClientVolume[client]);
+		return Plugin_Handled;
+	}
+	
+	char arg[16];
+	GetCmdArg(1, arg, sizeof(arg));
+	
+	float newVolume = StringToFloat(arg);
+	
+	// If user entered percentage (e.g., 80), convert to decimal
+	if (newVolume > 1.0 && newVolume <= 100.0)
+	{
+		newVolume = newVolume / 100.0;
+	}
+	
+	if (newVolume < 0.0 || newVolume > 1.0)
+	{
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Volume must be between {lightgreen}0.0 {default}and {lightgreen}1.0 {default}(or {lightgreen}0%% {default}and {lightgreen}100%%{default})");
+		return Plugin_Handled;
+	}
+	
+	g_fClientVolume[client] = newVolume;
+	SaveClientCookies(client);
+	
+	CPrintToChat(client, "{green}[Quake Sounds] {default}Volume set to {lightgreen}%.1f%% {default}({lightgreen}%.2f{default})", newVolume * 100, newVolume);
+	
+	return Plugin_Handled;
+}
+
+public Action Command_Voice(int client, int args)
+{
+	if (client == 0)
+	{
+		PrintToServer("This command can only be used in-game.");
+		return Plugin_Handled;
+	}
+	
+	if (args < 1)
+	{
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Usage: !voice <male/female>");
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Current voice: {lightgreen}%s", g_iVoiceGender[client] == VOICE_MALE ? "Male" : "Female");
+		
+		// Show available voice sets
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Available voice sets:");
+		for (int i = 0; i < g_iNumSets; i++)
+		{
+			if (StrEqual(g_sVoiceGender[i], "male", false) && g_iVoiceGender[client] == VOICE_MALE)
+			{
+				CPrintToChat(client, "- {lightgreen}%s {default}(Current)", g_sSetsName[i]);
+			}
+			else if (StrEqual(g_sVoiceGender[i], "female", false) && g_iVoiceGender[client] == VOICE_FEMALE)
+			{
+				CPrintToChat(client, "- {lightgreen}%s {default}(Current)", g_sSetsName[i]);
+			}
+			else if (StrEqual(g_sVoiceGender[i], "male", false))
+			{
+				CPrintToChat(client, "- {lightgreen}%s", g_sSetsName[i]);
+			}
+			else if (StrEqual(g_sVoiceGender[i], "female", false))
+			{
+				CPrintToChat(client, "- {lightgreen}%s", g_sSetsName[i]);
+			}
+		}
+		
+		return Plugin_Handled;
+	}
+	
+	char arg[16];
+	GetCmdArg(1, arg, sizeof(arg));
+	
+	if (StrEqual(arg, "male", false))
+	{
+		g_iVoiceGender[client] = VOICE_MALE;
+		SaveClientCookies(client);
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Voice set to {lightgreen}Male{default}. Sounds will now use male voice packs.");
+		
+		// Find first male preset
+		for (int i = 0; i < g_iNumSets; i++)
+		{
+			if (StrEqual(g_sVoiceGender[i], "male", false))
+			{
+				g_iSoundPreset[client] = i;
+				SaveClientCookies(client);
+				CPrintToChat(client, "{green}[Quake Sounds] {default}Preset automatically changed to: {lightgreen}%s", g_sSetsName[i]);
+				break;
+			}
+		}
+	}
+	else if (StrEqual(arg, "female", false))
+	{
+		g_iVoiceGender[client] = VOICE_FEMALE;
+		SaveClientCookies(client);
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Voice set to {lightgreen}Female{default}. Sounds will now use female voice packs.");
+		
+		// Find first female preset
+		for (int i = 0; i < g_iNumSets; i++)
+		{
+			if (StrEqual(g_sVoiceGender[i], "female", false))
+			{
+				g_iSoundPreset[client] = i;
+				SaveClientCookies(client);
+				CPrintToChat(client, "{green}[Quake Sounds] {default}Preset automatically changed to: {lightgreen}%s", g_sSetsName[i]);
+				break;
+			}
+		}
+	}
+	else
+	{
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Usage: !voice <male/female>");
+	}
+	
+	return Plugin_Handled;
+}
+
 //  888b     d888 8888888888 888b    888 888     888
 //  8888b   d8888 888        8888b   888 888     888
 //  88888b.d88888 888        88888b  888 888     888
@@ -182,7 +324,6 @@ public Action Command_QuakeSounds(int client, int args)
 //  888  Y8P  888 888        888  Y88888 888     888
 //  888   "   888 888        888   Y8888 Y88b. .d88P
 //  888       888 8888888888 888    Y888  "Y88888P"
-
 
 public void CookieMenu_QuakeSounds(int client, CookieMenuAction action, any info, char[] buffer, int maxlen)
 {
@@ -201,25 +342,42 @@ public void DisplayCookieMenu(int client)
 	menu.ExitBackButton = true;
 	menu.ExitButton = true;
 
-	char sBuffer[100];
-	Format(sBuffer, sizeof(sBuffer), "%T", "quake menu", client);
+	char sBuffer[128];
+	Format(sBuffer, sizeof(sBuffer), "%T\n ", "quake menu", client);
 	SetMenuTitle(menu, sBuffer);
 
+	// Text toggle
 	Format(sBuffer, sizeof(sBuffer), "%T", g_iShowText[client] ? "disable text" : "enable text", client);
 	AddMenuItem(menu, "text pref", sBuffer);
 
+	// Sound toggle
 	Format(sBuffer, sizeof(sBuffer), "%T",  g_iSound[client] ? "sounds disable" : "sounds enable", client);
 	AddMenuItem(menu, "no sounds", sBuffer);
 
+	// Voice gender
+	char genderStr[32];
+	Format(genderStr, sizeof(genderStr), "%T", g_iVoiceGender[client] == VOICE_MALE ? "male" : "female", client);
+	Format(sBuffer, sizeof(sBuffer), "%T: %s", "voice gender", client, genderStr);
+	AddMenuItem(menu, "voice gender", sBuffer);
+
+	// Sound preset (filtered by gender)
 	char sBufferSoundPack[64];
 	Format(sBufferSoundPack, sizeof(sBufferSoundPack), "%T", "sound pack", client);
 	char sBufferSoundPackOption[64];
 	if (g_iSoundPreset[client] < g_iNumSets)
-		Format(sBufferSoundPackOption, sizeof(sBufferSoundPackOption), "%T", g_sSetsName[g_iSoundPreset[client]], client);
+	{
+		char genderPreset[32];
+		Format(genderPreset, sizeof(genderPreset), "%T", StrEqual(g_sVoiceGender[g_iSoundPreset[client]], "male", false) ? "male" : "female", client);
+		Format(sBufferSoundPackOption, sizeof(sBufferSoundPackOption), "%s (%s)", g_sSetsName[g_iSoundPreset[client]], genderPreset);
+	}
 	else
 		Format(sBufferSoundPackOption, sizeof(sBufferSoundPackOption), "%s", "Error");
 	Format(sBuffer, sizeof(sBuffer), "%s: %s", sBufferSoundPack, sBufferSoundPackOption);
 	AddMenuItem(menu, "sound set", sBuffer);
+
+	// Volume
+	Format(sBuffer, sizeof(sBuffer), "%T: %.0f%%", "volume", client, g_fClientVolume[client] * 100);
+	AddMenuItem(menu, "volume", sBuffer);
 
 	DisplayMenu(menu, client, MENU_TIME_FOREVER);
 }
@@ -240,56 +398,203 @@ public int MenuHandler_QuakeSounds(Menu menu, MenuAction action, int param1, int
 		}
 		case MenuAction_Select:
 		{
-			switch (param2)
+			char info[32];
+			GetMenuItem(menu, param2, info, sizeof(info));
+			
+			if (StrEqual(info, "text pref"))
 			{
-				case 0:
-				{
-					g_iShowText[param1] = g_iShowText[param1] ? 0 : 1;
-				}
-				case 1:
-				{
-					g_iSound[param1] = g_iSound[param1] ? 0 : 1;
-				}
-				case 2:
-				{
-					g_iSoundPreset[param1]++;
-					if (g_iSoundPreset[param1] >= g_iNumSets)
-						g_iSoundPreset[param1] = 0;
-				}
+				g_iShowText[param1] = g_iShowText[param1] ? 0 : 1;
 			}
+			else if (StrEqual(info, "no sounds"))
+			{
+				g_iSound[param1] = g_iSound[param1] ? 0 : 1;
+			}
+			else if (StrEqual(info, "voice gender"))
+			{
+				g_iVoiceGender[param1] = g_iVoiceGender[param1] == VOICE_MALE ? VOICE_FEMALE : VOICE_MALE;
+				SelectPresetForGender(param1);
+			}
+			else if (StrEqual(info, "sound set"))
+			{
+				DisplayPresetMenu(param1);
+				return 0;
+			}
+			else if (StrEqual(info, "volume"))
+			{
+				DisplayVolumeMenu(param1);
+				return 0;
+			}
+			
 			SaveClientCookies(param1);
-			DisplayMenu(menu, param1, MENU_TIME_FOREVER);
+			DisplayCookieMenu(param1);
 		}
 		case MenuAction_DisplayItem:
 		{
-			char sBuffer[32];
-			switch(param2)
-			{
-				case 0:
-				{
-					Format(sBuffer, sizeof(sBuffer), "%T", g_iShowText[param1] ? "disable text" : "enable text", param1);
-				}
-				case 1:
-				{
-					Format(sBuffer, sizeof(sBuffer), "%T",  g_iSound[param1] ? "sounds disable" : "sounds enable", param1);
-				}
-				case 2:
-				{
-					char sBufferSoundPack[64];
-					Format(sBufferSoundPack, sizeof(sBufferSoundPack), "%T", "sound pack", param1);
-					char sBufferSoundPackOption[64];
-					Format(sBufferSoundPack, sizeof(sBufferSoundPack), "%T", "sound pack", param1);
-					if (g_iSoundPreset[param1] < g_iNumSets)
-						Format(sBufferSoundPackOption, sizeof(sBufferSoundPackOption), "%T", g_sSetsName[g_iSoundPreset[param1]], param1);
-					else
-						Format(sBufferSoundPackOption, sizeof(sBufferSoundPackOption), "%s", "Error");
-					Format(sBuffer, sizeof(sBuffer), "%s: %s", sBufferSoundPack, sBufferSoundPackOption);
-				}
-			}
+			char sBuffer[128];
+			GetMenuItem(menu, param2, "", 0, _, sBuffer, sizeof(sBuffer));
 			return RedrawMenuItem(sBuffer);
 		}
 	}
 	return 0;
+}
+
+void DisplayVolumeMenu(int client)
+{
+	Menu menu = new Menu(MenuHandler_Volume);
+	char title[128];
+	Format(title, sizeof(title), "%T\nCurrent: %.0f%%", "volume", client, g_fClientVolume[client] * 100);
+	menu.SetTitle(title);
+	
+	char sBuffer[32];
+	
+	for (int i = 100; i >= 10; i -= 10)
+	{
+		Format(sBuffer, sizeof(sBuffer), "%d", i);
+		AddMenuItem(menu, sBuffer, sBuffer, i/10 == RoundToFloor(g_fClientVolume[client] * 10) ? ITEMDRAW_DISABLED : ITEMDRAW_DEFAULT);
+	}
+	
+	AddMenuItem(menu, "5", "5%");
+	AddMenuItem(menu, "0", "Mute");
+	AddMenuItem(menu, "custom", "Custom Value...");
+	AddMenuItem(menu, "back", "Back");
+	
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_Volume(Menu menu, MenuAction action, int param1, int param2)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Select:
+		{
+			char info[32];
+			GetMenuItem(menu, param2, info, sizeof(info));
+			
+			if (StrEqual(info, "back"))
+			{
+				DisplayCookieMenu(param1);
+				return 0;
+			}
+			else if (StrEqual(info, "custom"))
+			{
+				CPrintToChat(param1, "{green}[Quake Sounds] {default}Type {lightgreen}!volume <0.0-1.0> {default}or {lightgreen}!volume <percentage> {default}in chat");
+				DisplayVolumeMenu(param1);
+				return 0;
+			}
+			else
+			{
+				float newVolume = StringToInt(info) / 100.0;
+				g_fClientVolume[param1] = newVolume;
+				SaveClientCookies(param1);
+				CPrintToChat(param1, "{green}[Quake Sounds] {default}Volume set to {lightgreen}%d%%", StringToInt(info));
+				DisplayVolumeMenu(param1);
+			}
+		}
+	}
+	return 0;
+}
+
+void DisplayPresetMenu(int client)
+{
+	Menu menu = new Menu(MenuHandler_Preset);
+	char title[128];
+	char genderStr[32];
+	Format(genderStr, sizeof(genderStr), "%T", g_iVoiceGender[client] == VOICE_MALE ? "male" : "female", client);
+	Format(title, sizeof(title), "%T (%s %T)\n ", "sound pack", client, genderStr, "voice gender", client);
+	menu.SetTitle(title);
+	
+	char sBuffer[128], sIndex[8];
+	bool foundPreset = false;
+	
+	for (int i = 0; i < g_iNumSets; i++)
+	{
+		// Filter by gender
+		if ((g_iVoiceGender[client] == VOICE_MALE && StrEqual(g_sVoiceGender[i], "male", false)) ||
+			(g_iVoiceGender[client] == VOICE_FEMALE && StrEqual(g_sVoiceGender[i], "female", false)))
+		{
+			foundPreset = true;
+			IntToString(i, sIndex, sizeof(sIndex));
+			char setGender[32];
+			Format(setGender, sizeof(setGender), "%T", StrEqual(g_sVoiceGender[i], "male", false) ? "male" : "female", client);
+			Format(sBuffer, sizeof(sBuffer), "%s (%s)", g_sSetsName[i], setGender);
+			AddMenuItem(menu, sIndex, sBuffer, i == g_iSoundPreset[client] ? ITEMDRAW_DISABLED : ITEMDRAW_DEFAULT);
+		}
+	}
+	
+	if (!foundPreset)
+	{
+		CPrintToChat(client, "{green}[Quake Sounds] {default}No {lightgreen}%s {default}voice packs found! Using first available pack.", genderStr);
+		for (int i = 0; i < g_iNumSets; i++)
+		{
+			IntToString(i, sIndex, sizeof(sIndex));
+			char setGender[32];
+			Format(setGender, sizeof(setGender), "%T", StrEqual(g_sVoiceGender[i], "male", false) ? "male" : "female", client);
+			Format(sBuffer, sizeof(sBuffer), "%s (%s)", g_sSetsName[i], setGender);
+			AddMenuItem(menu, sIndex, sBuffer, i == g_iSoundPreset[client] ? ITEMDRAW_DISABLED : ITEMDRAW_DEFAULT);
+		}
+	}
+	
+	AddMenuItem(menu, "back", "Back");
+	
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int MenuHandler_Preset(Menu menu, MenuAction action, int param1, int param2)
+{
+	switch(action)
+	{
+		case MenuAction_End:
+		{
+			delete menu;
+		}
+		case MenuAction_Select:
+		{
+			char info[32];
+			GetMenuItem(menu, param2, info, sizeof(info));
+			
+			if (StrEqual(info, "back"))
+			{
+				DisplayCookieMenu(param1);
+				return 0;
+			}
+			
+			int preset = StringToInt(info);
+			if (preset >= 0 && preset < g_iNumSets)
+			{
+				g_iSoundPreset[param1] = preset;
+				SaveClientCookies(param1);
+				char genderStr[32];
+				Format(genderStr, sizeof(genderStr), "%T", StrEqual(g_sVoiceGender[preset], "male", false) ? "male" : "female", param1);
+				CPrintToChat(param1, "{green}[Quake Sounds] {default}Sound pack set to: {lightgreen}%s {default}({lightgreen}%s{default})", g_sSetsName[preset], genderStr);
+				DisplayPresetMenu(param1);
+			}
+		}
+	}
+	return 0;
+}
+
+void SelectPresetForGender(int client)
+{
+	int gender = g_iVoiceGender[client];
+	
+	for (int i = 0; i < g_iNumSets; i++)
+	{
+		if ((gender == VOICE_MALE && StrEqual(g_sVoiceGender[i], "male", false)) ||
+			(gender == VOICE_FEMALE && StrEqual(g_sVoiceGender[i], "female", false)))
+		{
+			g_iSoundPreset[client] = i;
+			return;
+		}
+	}
+	
+	if (g_iNumSets > 0)
+	{
+		g_iSoundPreset[client] = 0;
+	}
 }
 
 // Hooks correct game events
@@ -363,11 +668,21 @@ public void LoadQuakeSetConfig()
 			LogError("Could not find \"name\" in \"%s\"", sSection);
 			continue;
 		}
+		
+		// Get voice gender from config
+		char sGender[16];
+		KvConfig.GetString("gender", sGender, sizeof(sGender), "male");
+		if (!StrEqual(sGender, "male", false) && !StrEqual(sGender, "female", false))
+		{
+			LogError("Invalid gender '%s' in set '%s'. Using 'male' as default.", sGender, sSoundSet);
+			sGender = "male";
+		}
 
 		g_sSetsName[g_iNumSets] = sSoundSet;
+		g_sVoiceGender[g_iNumSets] = sGender;
 
 		BuildPath(Path_SM, sConfigFile, sizeof(sConfigFile), "%s/%s.cfg", PATH_CONFIG_QUAKE_SOUNDS, g_sSetsName[g_iNumSets]);
-		PrintToServer("[SM] Quake Sounds: Loading sound set config '%s'.", sConfigFile);
+		PrintToServer("[SM] Quake Sounds: Loading sound set config '%s' (%s voice)", sConfigFile, sGender);
 		LoadSet(sConfigFile, g_iNumSets);
 		g_iNumSets++;
 	} while(KvConfig.GotoNextKey(false));
@@ -390,7 +705,7 @@ public void LoadSet(char[] setFile, int setNum)
 				{
 					KvGetSectionName(SetFileKV, sBuffer, sizeof(sBuffer));
 					int killNum = StringToInt(sBuffer);
-					if (killNum >= 0)
+					if (killNum >= 0 && killNum < MAX_NUM_KILLS)
 					{
 						KvGetString(SetFileKV, "sound", headshotSound[setNum][killNum], sizeof(sBuffer));
 						headshotConfig[setNum][killNum] = KvGetNum(SetFileKV, "config", 9);
@@ -543,7 +858,7 @@ public void LoadSet(char[] setFile, int setNum)
 				{
 					KvGetSectionName(SetFileKV, sBuffer, sizeof(sBuffer));
 					int killNum = StringToInt(sBuffer);
-					if (killNum >= 0)
+					if (killNum >= 0 && killNum < MAX_NUM_KILLS)
 					{
 						KvGetString(SetFileKV, "sound", killSound[setNum][killNum], sizeof(sBuffer));
 						killConfig[setNum][killNum] = KvGetNum(SetFileKV, "config", 9);
@@ -638,7 +953,7 @@ public void LoadSet(char[] setFile, int setNum)
 				{
 					KvGetSectionName(SetFileKV, sBuffer, sizeof(sBuffer));
 					int killNum = StringToInt(sBuffer);
-					if (killNum >= 0)
+					if (killNum >= 0 && killNum < MAX_NUM_KILLS)
 					{
 						KvGetString(SetFileKV, "sound", comboSound[setNum][killNum], sizeof(sBuffer));
 						comboConfig[setNum][killNum] = KvGetNum(SetFileKV, "config", 9);
@@ -727,7 +1042,7 @@ public Action Timer_JoinCheck(Handle timer, int iUserID)
 				{
 					if (joinConfig[g_iSoundPreset[client]] & i)
 					{
-						EmitSoundCustom(client, joinSound[g_iSoundPreset[client]], _, _, _, _, g_fVolume);
+						EmitSoundCustom(client, joinSound[g_iSoundPreset[client]], _, _, _, _, g_fVolume * g_fClientVolume[client]);
 						break;
 					}
 				}
@@ -746,7 +1061,7 @@ public Action Timer_Announce(Handle timer, int iUserID)
 	if (!client || !IsClientInGame(client))
 		return Plugin_Stop;
 
-	PrintToChat(client, "%t", "announce message");
+	CPrintToChat(client, "{green}[Quake Sounds] {default}%t", "announce message");
 	return Plugin_Stop;
 }
 
@@ -759,7 +1074,7 @@ public void Event_RoundFreezeEnd(Handle event, const char[] name, bool dontBroad
 		{
 			if (strcmp(roundplaySound[g_iSoundPreset[i]], "", false) != 0 && (roundplayConfig[g_iSoundPreset[i]] & 1) || (roundplayConfig[g_iSoundPreset[i]] & 2) || (roundplayConfig[g_iSoundPreset[i]] & 4))
 			{
-				EmitSoundCustom(i, roundplaySound[g_iSoundPreset[i]], _, _, _, _, g_fVolume);
+				EmitSoundCustom(i, roundplaySound[g_iSoundPreset[i]], _, _, _, _, g_fVolume * g_fClientVolume[i]);
 			}
 			if (g_iShowText[i] && (roundplayConfig[g_iSoundPreset[i]] & 8) || (roundplayConfig[g_iSoundPreset[i]] & 16) || (roundplayConfig[g_iSoundPreset[i]] & 32))
 			{
@@ -810,7 +1125,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 				sound = selfkillSound[soundPreset];
 
 				if ((strcmp(sound, "", false) != 0) && (soundConfig & 1) || ((soundConfig & 2) && attackerClient == i) || ((soundConfig & 4) && victimClient == i))
-					EmitSoundCustom(i, sound, _, _, _, _, g_fVolume);
+					EmitSoundCustom(i, sound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
 
 				if (g_iShowText[i] && ((soundConfig & 8) || ((soundConfig & 16) && attackerClient == i) || ((soundConfig & 32) && victimClient == i)))
 					PrintCenterText(i, "%t", "selfkill", victimName);
@@ -834,7 +1149,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 				sound = teamkillSound[soundPreset];
 
 				if (strcmp(sound, "", false) != 0 && (soundConfig & 1) || ((soundConfig & 2) && attackerClient == i) || ((soundConfig & 4) && victimClient == i))
-					EmitSoundCustom(i, sound, _, _, _, _, g_fVolume);
+					EmitSoundCustom(i, sound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
 
 				if (g_iShowText[i] && ((soundConfig & 8) || ((soundConfig & 16) && attackerClient == i) || ((soundConfig & 32) && victimClient == i)))
 					PrintCenterText(i, "%t", "teamkill", attackerName, victimName);
@@ -945,7 +1260,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 				if (firstblood && iFirstBConfig > 0)
 				{
 					if (strcmp(sFirstBSound, "", false) != 0 && (iFirstBConfig & 1) || ((iFirstBConfig & 2) && attackerClient == i) || ((iFirstBConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sFirstBSound, _, _, _, _, g_fVolume);
+						EmitSoundCustom(i, sFirstBSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
 
 					if (g_iShowText[i] && ((iFirstBConfig & 8) || ((iFirstBConfig & 16) && attackerClient == i) || ((iFirstBConfig & 32) && victimClient == i)))
 						PrintCenterText(i, "%t", "first blood", attackerName);
@@ -954,7 +1269,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 				else if (headshot && iHeadShotConfig > 0)
 				{
 					if (strcmp(sHeadShotSound, "", false) != 0 && (iHeadShotConfig & 1) || ((iHeadShotConfig & 2) && attackerClient == i) || ((iHeadShotConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sHeadShotSound, _, _, _, _, g_fVolume);
+						EmitSoundCustom(i, sHeadShotSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
 					
 					if (g_iShowText[i] && ((iHeadShotConfig & 8) || ((iHeadShotConfig & 16) && attackerClient == i) || ((iHeadShotConfig & 32) && victimClient == i)))
 						PrintCenterText(i, "%t", "headshot", attackerName);
@@ -963,7 +1278,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 				else if (headshot && iConsecutiveHeadshots < MAX_NUM_KILLS && iConsecutiveHSConfig > 0)
 				{
 					if (strcmp(sHeadShotSound, "", false) != 0 && (iConsecutiveHSConfig & 1) || ((iConsecutiveHSConfig & 2) && attackerClient == i) || ((iConsecutiveHSConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sHeadShotSound, _, _, _, _, g_fVolume);
+						EmitSoundCustom(i, sHeadShotSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
 
 					if (g_iShowText[i] && iConsecutiveHeadshots < MAX_NUM_KILLS && ((iConsecutiveHSConfig & 8) || ((iConsecutiveHSConfig & 16) && attackerClient == i) || ((iConsecutiveHSConfig & 32) && victimClient == i)))
 					{
@@ -975,7 +1290,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 				else if (knife && iKnifeConfig > 0)
 				{
 					if (strcmp(sKnifeSound, "", false) != 0 && (iKnifeConfig & 1) || ((iKnifeConfig & 2) && attackerClient == i) || ((iKnifeConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sKnifeSound, _, _, _, _, g_fVolume);
+						EmitSoundCustom(i, sKnifeSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
 
 					if (g_iShowText[i] && ((iKnifeConfig & 8) || ((iKnifeConfig & 16) && attackerClient == i) || ((iKnifeConfig & 32) && victimClient == i)))
 						PrintCenterText(i, "%t", "knife", attackerName, victimName);
@@ -984,7 +1299,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 				else if (grenade && iGrenadeConfig > 0)
 				{
 					if (strcmp(sGrenadeSound, "", false) != 0 && (iGrenadeConfig & 1) || ((iGrenadeConfig & 2) && attackerClient == i) || ((iGrenadeConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sGrenadeSound, _, _, _, _, g_fVolume);
+						EmitSoundCustom(i, sGrenadeSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
 
 					if (g_iShowText[i] && ((iGrenadeConfig & 8) || ((iGrenadeConfig & 16) && attackerClient == i) || ((iGrenadeConfig & 32) && victimClient == i)))
 						PrintCenterText(i, "%t", "grenade", attackerName, victimName);
@@ -993,7 +1308,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 				else if (combo && iComboScore < MAX_NUM_KILLS && iComboConfig > 0)
 				{
 					if (strcmp(sComboSound, "", false) != 0 && (iComboConfig & 1) || ((iComboConfig & 2) && attackerClient == i) || ((iComboConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sComboSound, _, _, _, _, g_fVolume);
+						EmitSoundCustom(i, sComboSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
 
 					if (g_iShowText[i] && g_iComboScore[attackerClient] < MAX_NUM_KILLS && ((iComboConfig & 8) || ((iComboConfig & 16) && attackerClient == i) || ((iComboConfig & 32) && victimClient == i)))
 					{
@@ -1004,9 +1319,15 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 
 				else
 				{
-					// Clamp translations and sounds to 26 with a random value if they exceed it every 2 kills
 					int killNum = g_iConsecutiveKills[attackerClient];
 					bool bOver = killNum > 26 && killNum % 2 == 0;
+
+					if (killNum >= MAX_NUM_KILLS)
+					{
+						killNum = MAX_NUM_KILLS - 1;
+						bOver = true;
+					}
+					
 					if (bOver)
 					{
 						killNum = PickRandomSoundValue();
@@ -1014,7 +1335,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 					}
 
 					if (iConsecutiveKills < MAX_NUM_KILLS && strcmp(sKillSound, "", false) != 0 && (iKillConfig & 1) || ((iKillConfig & 2) && attackerClient == i) || ((iKillConfig & 4) && victimClient == i) || bOver)
-						EmitSoundCustom(i, sKillSound, _, _, _, _, g_fVolume);
+						EmitSoundCustom(i, sKillSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
 
 					if (g_iShowText[i] && g_iConsecutiveKills[attackerClient] < MAX_NUM_KILLS && ((iKillConfig & 8) || ((iKillConfig & 16) && attackerClient == i) || ((iKillConfig & 32) && victimClient == i) || bOver))
 					{
@@ -1074,12 +1395,12 @@ stock void EmitSoundCustom(int client, const char[] sound, int entity=SOUND_FROM
 
 public void ReadClientCookies(int client)
 {
-	char sValue[32];
+	char sValue[128];
 	GetClientCookie(client, g_hQuakeSettings, sValue, sizeof(sValue));
 	
-	if (strlen(sValue) >= 5) //  Format is "0|0|0"
+	if (strlen(sValue) >= 5) // Format is "0|0|0|1.0|0"
 	{
-		char sParts[3][16];
+		char sParts[5][16];
 		int numParts = ExplodeString(sValue, "|", sParts, sizeof(sParts), sizeof(sParts[]));
 		
 		if (numParts >= 1) {
@@ -1092,6 +1413,14 @@ public void ReadClientCookies(int client)
 			int preset = StringToInt(sParts[2]);
 			g_iSoundPreset[client] = (preset >= 0 && preset < g_iNumSets) ? preset : 0;
 		}
+		if (numParts >= 4) {
+			float volume = StringToFloat(sParts[3]);
+			g_fClientVolume[client] = (volume >= 0.0 && volume <= 1.0) ? volume : 1.0;
+		}
+		if (numParts >= 5) {
+			int gender = StringToInt(sParts[4]);
+			g_iVoiceGender[client] = (gender == VOICE_MALE || gender == VOICE_FEMALE) ? gender : VOICE_MALE;
+		}
 	}
 	else
 	{
@@ -1100,6 +1429,18 @@ public void ReadClientCookies(int client)
 		g_iSound[client] = GetConVarInt(g_cvar_Sound);
 		int defaultPreset = GetConVarInt(g_cvar_SoundPreset) - 1;
 		g_iSoundPreset[client] = (defaultPreset >= 0 && defaultPreset < g_iNumSets) ? defaultPreset : 0;
+		g_fClientVolume[client] = GetConVarFloat(g_cvar_Volume);
+		g_iVoiceGender[client] = GetConVarInt(g_cvar_DefaultGender);
+	}
+	
+	// Ensure preset matches gender
+	if (g_iSoundPreset[client] < g_iNumSets)
+	{
+		char setGender = StrEqual(g_sVoiceGender[g_iSoundPreset[client]], "male", false) ? VOICE_MALE : VOICE_FEMALE;
+		if (setGender != g_iVoiceGender[client])
+		{
+			SelectPresetForGender(client);
+		}
 	}
 }
 
@@ -1108,8 +1449,13 @@ public void SaveClientCookies(int client)
 	if (!AreClientCookiesCached(client) || IsFakeClient(client))
 		return;
 
-	char sValue[32];
-	Format(sValue, sizeof(sValue), "%d|%d|%d", g_iShowText[client], g_iSound[client], g_iSoundPreset[client]);
+	char sValue[128];
+	Format(sValue, sizeof(sValue), "%d|%d|%d|%.2f|%d", 
+		g_iShowText[client], 
+		g_iSound[client], 
+		g_iSoundPreset[client], 
+		g_fClientVolume[client],
+		g_iVoiceGender[client]);
 	SetClientCookie(client, g_hQuakeSettings, sValue);
 }
 
@@ -1141,5 +1487,12 @@ stock int PickRandomSoundValue()
 		case 10:
 			iRandom = 26;
 	}
+	
+	// Ensure within bounds
+	if (iRandom >= MAX_NUM_KILLS)
+	{
+		iRandom = MAX_NUM_KILLS - 1;
+	}
+	
 	return iRandom;
 }

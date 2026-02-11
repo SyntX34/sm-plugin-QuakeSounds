@@ -18,11 +18,23 @@
 #define VOICE_MALE					0
 #define VOICE_FEMALE				1
 
+enum SoundCategory
+{
+	CATEGORY_NONE = 0,
+	CATEGORY_HEADSHOT,
+	CATEGORY_KILLSTREAK_SHORT,  // Double kill, triple kill, multi-kill
+	CATEGORY_KILLSTREAK_LONG,   // Monsterkill, ultrakill, etc.
+	CATEGORY_SPECIAL,           // First blood, grenade, knife
+	CATEGORY_COMBO,
+	CATEGORY_JOIN,
+	CATEGORY_ROUND
+}
+
 public Plugin myinfo = {
 	name = "Quake Sounds",
-	author = "Spartan_C001, maxime1907, .Rushaway",
+	author = "Spartan_C001, maxime1907, .Rushaway, +SyntX",
 	description = "Plays sounds based on events that happen in game.",
-	version = "4.2.2",
+	version = "4.2.3",
 	url = "http://steamcommunity.com/id/spartan_c001/",
 }
 
@@ -62,6 +74,32 @@ int g_iConsecutiveKills[MAXPLAYERS+1];
 int g_iComboScore[MAXPLAYERS+1];
 int g_iConsecutiveHeadshots[MAXPLAYERS+1];
 float g_fLastKillTime[MAXPLAYERS+1];
+bool g_bRoundStarted = false;
+
+// Anti-spam cooldowns
+float g_fLastSoundTime[MAXPLAYERS+1];
+float g_fLastHeadshotTime[MAXPLAYERS+1];
+float g_fLastKillStreakTime[MAXPLAYERS+1];
+float g_fLastSpecialTime[MAXPLAYERS+1];
+SoundCategory g_iLastSoundCategory[MAXPLAYERS+1];
+int g_iMonsterkillThreshold = 50;    
+int g_iUltrakillThreshold = 75;       
+int g_iKillingSpreeThreshold = 15;    
+int g_iDominatingThreshold = 20;     
+int g_iUnstoppableThreshold = 35;     
+int g_iGodlikeThreshold = 45;       
+
+// Kill streak thresholds for short sounds (double kill, triple kill, etc.)
+int g_iDoubleKillThreshold = 2;
+int g_iTripleKillThreshold = 3;
+int g_iMultiKillThreshold = 4;
+int g_iMegaKillThreshold = 5;
+
+// Cooldown times (in seconds)
+float g_fHeadshotCooldown = 0.5;
+float g_fKillStreakCooldown = 1.0;
+float g_fSpecialCooldown = 2.0;
+float g_fGeneralCooldown = 0.3;  // Minimum time between any sounds
 
 // Preferences
 Handle g_hQuakeSettings = INVALID_HANDLE;
@@ -79,6 +117,13 @@ ConVar g_cvar_ComboTime;
 ConVar g_cvar_SelfKill;
 ConVar g_cvar_TeamKill;
 ConVar g_cvar_DefaultGender;
+ConVar g_cvar_AntiSpam;                   
+ConVar g_cvar_MonsterkillThreshold;       
+ConVar g_cvar_UltrakillThreshold;         
+ConVar g_cvar_HeadshotCooldown;          
+ConVar g_cvar_KillStreakCooldown;        
+ConVar g_cvar_SpecialCooldown;        
+ConVar g_cvar_GeneralCooldown;         
 
 EngineVersion g_evGameEngine;
 
@@ -105,6 +150,13 @@ public void OnPluginStart()
 	g_cvar_SelfKill = CreateConVar("sm_quakesounds_selfkill", "1", "Enable/Disable selfkill sounds; 0=Disabled, 1=Enabled", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_cvar_TeamKill = CreateConVar("sm_quakesounds_teamkill", "1", "Enable/Disable teamkill sounds; 0=Disabled, 1=Enabled", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_cvar_DefaultGender = CreateConVar("sm_quakesounds_default_gender", "0", "Default voice gender: 0=Male, 1=Female", FCVAR_NONE, true, 0.0, true, 1.0);
+	g_cvar_AntiSpam = CreateConVar("sm_quakesounds_antispam", "1", "Enable anti-spam features (cooldowns and higher thresholds), 0=Disabled, 1=Enabled", FCVAR_NONE, true, 0.0, true, 1.0);
+	g_cvar_MonsterkillThreshold = CreateConVar("sm_quakesounds_monsterkill_threshold", "50", "Minimum kills for monsterkill sound (default: 50, was: 25)", FCVAR_NONE, true, 10.0, true, 999.0);
+	g_cvar_UltrakillThreshold = CreateConVar("sm_quakesounds_ultrakill_threshold", "75", "Minimum kills for ultrakill sound (default: 75, was: 30)", FCVAR_NONE, true, 15.0, true, 999.0);
+	g_cvar_HeadshotCooldown = CreateConVar("sm_quakesounds_headshot_cooldown", "0.5", "Cooldown in seconds between headshot sounds", FCVAR_NONE, true, 0.1, true, 5.0);
+	g_cvar_KillStreakCooldown = CreateConVar("sm_quakesounds_killstreak_cooldown", "1.0", "Cooldown in seconds between kill streak sounds (double/triple kill)", FCVAR_NONE, true, 0.1, true, 5.0);
+	g_cvar_SpecialCooldown = CreateConVar("sm_quakesounds_special_cooldown", "2.0", "Cooldown in seconds between special sounds (grenade/knife/first blood)", FCVAR_NONE, true, 0.1, true, 5.0);
+	g_cvar_GeneralCooldown = CreateConVar("sm_quakesounds_general_cooldown", "0.3", "Minimum time in seconds between any quake sounds", FCVAR_NONE, true, 0.1, true, 5.0);
 
 	g_hQuakeSettings = RegClientCookie("quakesounds_settings", "Quake Sounds Settings", CookieAccess_Private);
 
@@ -114,15 +166,17 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_qs", Command_QuakeSounds);
 	RegConsoleCmd("sm_quakesounds", Command_QuakeSounds);
 
-	// Add commands for quick settings
 	RegConsoleCmd("sm_quakevolume", Command_Volume);
 	RegConsoleCmd("sm_qsvolume", Command_Volume);
 	RegConsoleCmd("sm_quakevoice", Command_Voice);
 	RegConsoleCmd("sm_qsvoice", Command_Voice);
 
+	RegConsoleCmd("sm_killstreak", Command_KillStreak);
+	RegConsoleCmd("sm_ks", Command_KillStreak);
+
 	HookGameEvents();
 
-	AutoExecConfig(true);
+	AutoExecConfig(true, "quake_sounds_antispam");
 
 	// Late load
 	if (!g_bLate)
@@ -152,6 +206,19 @@ public void OnMapStart()
 public void OnConfigsExecuted()
 {
 	g_fVolume = g_cvar_Volume.FloatValue;
+	g_iMonsterkillThreshold = g_cvar_MonsterkillThreshold.IntValue;
+	g_iUltrakillThreshold = g_cvar_UltrakillThreshold.IntValue;
+	g_fHeadshotCooldown = g_cvar_HeadshotCooldown.FloatValue;
+	g_fKillStreakCooldown = g_cvar_KillStreakCooldown.FloatValue;
+	g_fSpecialCooldown = g_cvar_SpecialCooldown.FloatValue;
+	g_fGeneralCooldown = g_cvar_GeneralCooldown.FloatValue;
+	g_iKillingSpreeThreshold = 15;
+	g_iDominatingThreshold = 20;
+	g_iUnstoppableThreshold = 35;
+	g_iGodlikeThreshold = 45;
+	
+	LogMessage("[Quake Sounds] Anti-spam thresholds loaded: Monsterkill=%d, Ultrakill=%d", 
+		g_iMonsterkillThreshold, g_iUltrakillThreshold);
 }
 
 public void OnClientPostAdminCheck(int client)
@@ -312,6 +379,50 @@ public Action Command_Voice(int client, int args)
 	{
 		CPrintToChat(client, "{green}[Quake Sounds] {default}Usage: !voice <male/female>");
 	}
+	
+	return Plugin_Handled;
+}
+
+public Action Command_KillStreak(int client, int args)
+{
+	if (client == 0)
+	{
+		PrintToServer("This command can only be used in-game.");
+		return Plugin_Handled;
+	}
+	
+	int kills = g_iConsecutiveKills[client];
+	int headshots = g_iConsecutiveHeadshots[client];
+	
+	char streakName[64];
+	GetStreakName(kills, streakName, sizeof(streakName));
+	
+	CPrintToChat(client, "{green}[Quake Sounds] {default}Current Kill Streak: {lightgreen}%d {default}kills", kills);
+	CPrintToChat(client, "{green}[Quake Sounds] {default}Consecutive Headshots: {lightgreen}%d", headshots);
+	CPrintToChat(client, "{green}[Quake Sounds] {default}Current Streak: {lightgreen}%s", streakName);
+	
+	if (kills < g_iDoubleKillThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Double Kill {default}({lightgreen}%d{default} kills)", g_iDoubleKillThreshold);
+	else if (kills < g_iTripleKillThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Triple Kill {default}({lightgreen}%d{default} kills)", g_iTripleKillThreshold);
+	else if (kills < g_iMultiKillThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Multi-Kill {default}({lightgreen}%d{default} kills)", g_iMultiKillThreshold);
+	else if (kills < g_iMegaKillThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Mega-Kill {default}({lightgreen}%d{default} kills)", g_iMegaKillThreshold);
+	else if (kills < g_iKillingSpreeThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Killing Spree {default}({lightgreen}%d{default} kills)", g_iKillingSpreeThreshold);
+	else if (kills < g_iDominatingThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Dominating {default}({lightgreen}%d{default} kills)", g_iDominatingThreshold);
+	else if (kills < g_iUnstoppableThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Unstoppable {default}({lightgreen}%d{default} kills)", g_iUnstoppableThreshold);
+	else if (kills < g_iGodlikeThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Godlike {default}({lightgreen}%d{default} kills)", g_iGodlikeThreshold);
+	else if (kills < g_iMonsterkillThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Monsterkill {default}({lightgreen}%d{default} kills)", g_iMonsterkillThreshold);
+	else if (kills < g_iUltrakillThreshold)
+		CPrintToChat(client, "{green}[Quake Sounds] {default}Next: {lightgreen}Ultrakill {default}({lightgreen}%d{default} kills)", g_iUltrakillThreshold);
+	else
+		CPrintToChat(client, "{green}[Quake Sounds] {default}You've reached the highest streak!");
 	
 	return Plugin_Handled;
 }
@@ -1090,6 +1201,21 @@ public void Event_RoundStart(Handle event, const char[] name, bool dontBroadcast
 	{
 		InitializeRound();
 	}
+	
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		ResetPlayerStats(i);
+	}
+}
+
+public void Event_RoundEnd(Handle event, const char[] name, bool dontBroadcast)
+{
+	g_bRoundStarted = false;
+	
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		ResetPlayerStats(i);
+	}
 }
 
 // Important bit - does all kill/combo/custom kill sounds and things!
@@ -1159,7 +1285,14 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 	else
 	{
 		g_iTotalKills++;
+		
+		// Increment with bounds checking
 		g_iConsecutiveKills[attackerClient]++;
+		if (g_iConsecutiveKills[attackerClient] >= MAX_NUM_KILLS)
+		{
+			g_iConsecutiveKills[attackerClient] = MAX_NUM_KILLS - 1;
+		}
+		
 		bool firstblood = false;
 		bool headshot = false;
 		bool knife = false;
@@ -1180,7 +1313,13 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 		}
 
 		if (headshot)
+		{
 			g_iConsecutiveHeadshots[attackerClient]++;
+			if (g_iConsecutiveHeadshots[attackerClient] >= MAX_NUM_KILLS)
+			{
+				g_iConsecutiveHeadshots[attackerClient] = MAX_NUM_KILLS - 1;
+			}
+		}
 
 		float fLastKillTimeTmp = g_fLastKillTime[attackerClient];
 		g_fLastKillTime[attackerClient] = GetEngineTime();
@@ -1194,6 +1333,12 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 		{
 			g_iComboScore[attackerClient]++;
 			combo = true;
+		}
+		
+		// Bounds checking for combo score
+		if (g_iComboScore[attackerClient] >= MAX_NUM_KILLS)
+		{
+			g_iComboScore[attackerClient] = MAX_NUM_KILLS - 1;
 		}
 
 		if (g_iTotalKills == 1)
@@ -1232,16 +1377,37 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 			else if (strcmp(weapon,"stunstick", false) == 0 || strcmp(weapon,"crowbar", false) == 0)
 				knife = true;
 		}
+		
+		// Check if anti-spam is enabled
+		bool bAntiSpam = g_cvar_AntiSpam.BoolValue;
+		float fCurrentTime = GetEngineTime();
+		
 		for (int i = 1; i <= MaxClients; i++)
 		{
 			if (IsClientInGame(i) && !IsFakeClient(i) && g_iSound[i])
 			{
-				int iComboScore = g_iComboScore[attackerClient];
+				// Get values with bounds checking
 				int iConsecutiveKills = g_iConsecutiveKills[attackerClient];
+				if (iConsecutiveKills >= MAX_NUM_KILLS)
+				{
+					iConsecutiveKills = MAX_NUM_KILLS - 1;
+				}
+				
+				int iComboScore = g_iComboScore[attackerClient];
+				if (iComboScore >= MAX_NUM_KILLS)
+				{
+					iComboScore = MAX_NUM_KILLS - 1;
+				}
+				
+				int iConsecutiveHeadshots = g_iConsecutiveHeadshots[attackerClient];
+				if (iConsecutiveHeadshots >= MAX_NUM_KILLS)
+				{
+					iConsecutiveHeadshots = MAX_NUM_KILLS - 1;
+				}
+				
 				int soundPreset = g_iSoundPreset[i];
 				int iFirstBConfig = firstbloodConfig[soundPreset];
 				int iHeadShotConfig = headshotConfig[soundPreset][iConsecutiveKills];
-				int iConsecutiveHeadshots = g_iConsecutiveHeadshots[attackerClient];
 				int iConsecutiveHSConfig = headshotConfig[soundPreset][iConsecutiveHeadshots];
 				int iKnifeConfig = knifeConfig[soundPreset];
 				int iGrenadeConfig = grenadeConfig[soundPreset];
@@ -1256,91 +1422,317 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 				sKnifeSound = knifeSound[soundPreset];
 				sGrenadeSound = grenadeSound[soundPreset];
 				sKillSound = killSound[soundPreset][iConsecutiveKills];
-
-				if (firstblood && iFirstBConfig > 0)
+				
+				// Anti-spam checks
+				bool bCanPlaySound = true;
+				SoundCategory currentCategory = CATEGORY_NONE;
+				float fLastCategoryTime = 0.0;
+				
+				if (bAntiSpam)
 				{
-					if (strcmp(sFirstBSound, "", false) != 0 && (iFirstBConfig & 1) || ((iFirstBConfig & 2) && attackerClient == i) || ((iFirstBConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sFirstBSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
-
-					if (g_iShowText[i] && ((iFirstBConfig & 8) || ((iFirstBConfig & 16) && attackerClient == i) || ((iFirstBConfig & 32) && victimClient == i)))
-						PrintCenterText(i, "%t", "first blood", attackerName);
-				}
-
-				else if (headshot && iHeadShotConfig > 0)
-				{
-					if (strcmp(sHeadShotSound, "", false) != 0 && (iHeadShotConfig & 1) || ((iHeadShotConfig & 2) && attackerClient == i) || ((iHeadShotConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sHeadShotSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
-					
-					if (g_iShowText[i] && ((iHeadShotConfig & 8) || ((iHeadShotConfig & 16) && attackerClient == i) || ((iHeadShotConfig & 32) && victimClient == i)))
-						PrintCenterText(i, "%t", "headshot", attackerName);
-				}
-
-				else if (headshot && iConsecutiveHeadshots < MAX_NUM_KILLS && iConsecutiveHSConfig > 0)
-				{
-					if (strcmp(sHeadShotSound, "", false) != 0 && (iConsecutiveHSConfig & 1) || ((iConsecutiveHSConfig & 2) && attackerClient == i) || ((iConsecutiveHSConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sHeadShotSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
-
-					if (g_iShowText[i] && iConsecutiveHeadshots < MAX_NUM_KILLS && ((iConsecutiveHSConfig & 8) || ((iConsecutiveHSConfig & 16) && attackerClient == i) || ((iConsecutiveHSConfig & 32) && victimClient == i)))
+					// Check general cooldown first
+					if (fCurrentTime - g_fLastSoundTime[i] < g_fGeneralCooldown)
 					{
-						Format(sBuffer, sizeof(sBuffer), "headshot %i", iConsecutiveHeadshots);
-						PrintCenterText(i, "%t", sBuffer, attackerName);
-					}
-				}
-
-				else if (knife && iKnifeConfig > 0)
-				{
-					if (strcmp(sKnifeSound, "", false) != 0 && (iKnifeConfig & 1) || ((iKnifeConfig & 2) && attackerClient == i) || ((iKnifeConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sKnifeSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
-
-					if (g_iShowText[i] && ((iKnifeConfig & 8) || ((iKnifeConfig & 16) && attackerClient == i) || ((iKnifeConfig & 32) && victimClient == i)))
-						PrintCenterText(i, "%t", "knife", attackerName, victimName);
-				}
-
-				else if (grenade && iGrenadeConfig > 0)
-				{
-					if (strcmp(sGrenadeSound, "", false) != 0 && (iGrenadeConfig & 1) || ((iGrenadeConfig & 2) && attackerClient == i) || ((iGrenadeConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sGrenadeSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
-
-					if (g_iShowText[i] && ((iGrenadeConfig & 8) || ((iGrenadeConfig & 16) && attackerClient == i) || ((iGrenadeConfig & 32) && victimClient == i)))
-						PrintCenterText(i, "%t", "grenade", attackerName, victimName);
-				}
-
-				else if (combo && iComboScore < MAX_NUM_KILLS && iComboConfig > 0)
-				{
-					if (strcmp(sComboSound, "", false) != 0 && (iComboConfig & 1) || ((iComboConfig & 2) && attackerClient == i) || ((iComboConfig & 4) && victimClient == i))
-						EmitSoundCustom(i, sComboSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
-
-					if (g_iShowText[i] && g_iComboScore[attackerClient] < MAX_NUM_KILLS && ((iComboConfig & 8) || ((iComboConfig & 16) && attackerClient == i) || ((iComboConfig & 32) && victimClient == i)))
-					{
-						Format(sBuffer, sizeof(sBuffer), "combo %i", g_iComboScore[attackerClient]);
-						PrintCenterText(i, "%t", sBuffer, attackerName);
-					}
-				}
-
-				else
-				{
-					int killNum = g_iConsecutiveKills[attackerClient];
-					bool bOver = killNum > 26 && killNum % 2 == 0;
-
-					if (killNum >= MAX_NUM_KILLS)
-					{
-						killNum = MAX_NUM_KILLS - 1;
-						bOver = true;
+						bCanPlaySound = false;
 					}
 					
-					if (bOver)
+					if (bCanPlaySound)
 					{
-						killNum = PickRandomSoundValue();
-						sKillSound = killSound[soundPreset][killNum];
+						// Determine sound category and check specific cooldowns
+						if (firstblood)
+						{
+							currentCategory = CATEGORY_SPECIAL;
+							fLastCategoryTime = g_fLastSpecialTime[i];
+						}
+						else if (headshot)
+						{
+							currentCategory = CATEGORY_HEADSHOT;
+							fLastCategoryTime = g_fLastHeadshotTime[i];
+						}
+						else if (knife || grenade)
+						{
+							currentCategory = CATEGORY_SPECIAL;
+							fLastCategoryTime = g_fLastSpecialTime[i];
+						}
+						else if (combo && (iConsecutiveKills == g_iDoubleKillThreshold || 
+								 iConsecutiveKills == g_iTripleKillThreshold || 
+								 iConsecutiveKills == g_iMultiKillThreshold ||
+								 iConsecutiveKills == g_iMegaKillThreshold))
+						{
+							currentCategory = CATEGORY_KILLSTREAK_SHORT;
+							fLastCategoryTime = g_fLastKillStreakTime[i];
+						}
+						else if (iConsecutiveKills >= g_iKillingSpreeThreshold && 
+								iConsecutiveKills < g_iDominatingThreshold)
+						{
+							// Killing spree - still a short streak sound
+							currentCategory = CATEGORY_KILLSTREAK_SHORT;
+							fLastCategoryTime = g_fLastKillStreakTime[i];
+						}
+						else if (iConsecutiveKills >= g_iMonsterkillThreshold || 
+								iConsecutiveKills >= g_iUltrakillThreshold ||
+								iConsecutiveKills >= g_iGodlikeThreshold ||
+								iConsecutiveKills >= g_iUnstoppableThreshold ||
+								iConsecutiveKills >= g_iDominatingThreshold)
+						{
+							// Long music-like sounds
+							currentCategory = CATEGORY_KILLSTREAK_LONG;
+							// Longer cooldown for these rare sounds
+							fLastCategoryTime = g_fLastKillStreakTime[i];
+						}
+						
+						// Check category-specific cooldown
+						if (currentCategory != CATEGORY_NONE)
+						{
+							float fRequiredCooldown = 0.0;
+							switch (currentCategory)
+							{
+								case CATEGORY_HEADSHOT:
+									fRequiredCooldown = g_fHeadshotCooldown;
+								case CATEGORY_KILLSTREAK_SHORT:
+									fRequiredCooldown = g_fKillStreakCooldown;
+								case CATEGORY_SPECIAL:
+									fRequiredCooldown = g_fSpecialCooldown;
+								case CATEGORY_KILLSTREAK_LONG:
+									// Longer cooldown for music-like sounds
+									fRequiredCooldown = g_fKillStreakCooldown * 2.0;
+							}
+							
+							if (fCurrentTime - fLastCategoryTime < fRequiredCooldown)
+							{
+								bCanPlaySound = false;
+							}
+						}
+					}
+				}
+				
+				// Only play one sound per kill - prioritize sounds
+				bool bSoundPlayed = false;
+				
+				if (bCanPlaySound)
+				{
+					if (firstblood && iFirstBConfig > 0)
+					{
+						if (strcmp(sFirstBSound, "", false) != 0 && (iFirstBConfig & 1) || ((iFirstBConfig & 2) && attackerClient == i) || ((iFirstBConfig & 4) && victimClient == i))
+						{
+							EmitSoundCustom(i, sFirstBSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
+							bSoundPlayed = true;
+							currentCategory = CATEGORY_SPECIAL;
+						}
+
+						if (g_iShowText[i] && ((iFirstBConfig & 8) || ((iFirstBConfig & 16) && attackerClient == i) || ((iFirstBConfig & 32) && victimClient == i)))
+							PrintCenterText(i, "%t", "first blood", attackerName);
 					}
 
-					if (iConsecutiveKills < MAX_NUM_KILLS && strcmp(sKillSound, "", false) != 0 && (iKillConfig & 1) || ((iKillConfig & 2) && attackerClient == i) || ((iKillConfig & 4) && victimClient == i) || bOver)
-						EmitSoundCustom(i, sKillSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
-
-					if (g_iShowText[i] && g_iConsecutiveKills[attackerClient] < MAX_NUM_KILLS && ((iKillConfig & 8) || ((iKillConfig & 16) && attackerClient == i) || ((iKillConfig & 32) && victimClient == i) || bOver))
+					else if (headshot && iHeadShotConfig > 0)
 					{
-						Format(sBuffer, sizeof(sBuffer), "killsound %i", killNum);
-						PrintCenterText(i, "%t", sBuffer, attackerName);
+						// Only play headshot sound for significant headshots or with cooldown
+						if (iConsecutiveHeadshots >= 2 || (bAntiSpam && fCurrentTime - g_fLastHeadshotTime[i] >= g_fHeadshotCooldown))
+						{
+							if (strcmp(sHeadShotSound, "", false) != 0 && (iHeadShotConfig & 1) || ((iHeadShotConfig & 2) && attackerClient == i) || ((iHeadShotConfig & 4) && victimClient == i))
+							{
+								EmitSoundCustom(i, sHeadShotSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
+								bSoundPlayed = true;
+								currentCategory = CATEGORY_HEADSHOT;
+							}
+						}
+						
+						if (g_iShowText[i] && ((iHeadShotConfig & 8) || ((iHeadShotConfig & 16) && attackerClient == i) || ((iHeadShotConfig & 32) && victimClient == i)))
+							PrintCenterText(i, "%t", "headshot", attackerName);
+					}
+
+					else if (headshot && iConsecutiveHeadshots < MAX_NUM_KILLS && iConsecutiveHSConfig > 0)
+					{
+						// Only play consecutive headshot sounds for significant streaks
+						if (iConsecutiveHeadshots >= 3 || (bAntiSpam && fCurrentTime - g_fLastHeadshotTime[i] >= g_fHeadshotCooldown))
+						{
+							if (strcmp(sHeadShotSound, "", false) != 0 && (iConsecutiveHSConfig & 1) || ((iConsecutiveHSConfig & 2) && attackerClient == i) || ((iConsecutiveHSConfig & 4) && victimClient == i))
+							{
+								EmitSoundCustom(i, sHeadShotSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
+								bSoundPlayed = true;
+								currentCategory = CATEGORY_HEADSHOT;
+							}
+						}
+
+						if (g_iShowText[i] && iConsecutiveHeadshots < MAX_NUM_KILLS && ((iConsecutiveHSConfig & 8) || ((iConsecutiveHSConfig & 16) && attackerClient == i) || ((iConsecutiveHSConfig & 32) && victimClient == i)))
+						{
+							Format(sBuffer, sizeof(sBuffer), "headshot %i", iConsecutiveHeadshots);
+							PrintCenterText(i, "%t", sBuffer, attackerName);
+						}
+					}
+
+					else if (knife && iKnifeConfig > 0)
+					{
+						if (strcmp(sKnifeSound, "", false) != 0 && (iKnifeConfig & 1) || ((iKnifeConfig & 2) && attackerClient == i) || ((iKnifeConfig & 4) && victimClient == i))
+						{
+							EmitSoundCustom(i, sKnifeSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
+							bSoundPlayed = true;
+							currentCategory = CATEGORY_SPECIAL;
+						}
+
+						if (g_iShowText[i] && ((iKnifeConfig & 8) || ((iKnifeConfig & 16) && attackerClient == i) || ((iKnifeConfig & 32) && victimClient == i)))
+							PrintCenterText(i, "%t", "knife", attackerName, victimName);
+					}
+
+					else if (grenade && iGrenadeConfig > 0)
+					{
+						if (strcmp(sGrenadeSound, "", false) != 0 && (iGrenadeConfig & 1) || ((iGrenadeConfig & 2) && attackerClient == i) || ((iGrenadeConfig & 4) && victimClient == i))
+						{
+							EmitSoundCustom(i, sGrenadeSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
+							bSoundPlayed = true;
+							currentCategory = CATEGORY_SPECIAL;
+						}
+
+						if (g_iShowText[i] && ((iGrenadeConfig & 8) || ((iGrenadeConfig & 16) && attackerClient == i) || ((iGrenadeConfig & 32) && victimClient == i)))
+							PrintCenterText(i, "%t", "grenade", attackerName, victimName);
+					}
+
+					else if (combo && iComboScore < MAX_NUM_KILLS && iComboConfig > 0)
+					{
+						// Only play combo sounds for significant combos
+						if (iComboScore >= 3 || (bAntiSpam && fCurrentTime - g_fLastKillStreakTime[i] >= g_fKillStreakCooldown))
+						{
+							if (strcmp(sComboSound, "", false) != 0 && (iComboConfig & 1) || ((iComboConfig & 2) && attackerClient == i) || ((iComboConfig & 4) && victimClient == i))
+							{
+								EmitSoundCustom(i, sComboSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
+								bSoundPlayed = true;
+								currentCategory = CATEGORY_KILLSTREAK_SHORT;
+							}
+						}
+
+						if (g_iShowText[i] && g_iComboScore[attackerClient] < MAX_NUM_KILLS && ((iComboConfig & 8) || ((iComboConfig & 16) && attackerClient == i) || ((iComboConfig & 32) && victimClient == i)))
+						{
+							Format(sBuffer, sizeof(sBuffer), "combo %i", g_iComboScore[attackerClient]);
+							PrintCenterText(i, "%t", sBuffer, attackerName);
+						}
+					}
+
+					else
+					{
+						int killNum = g_iConsecutiveKills[attackerClient];
+						bool bOver = killNum > 26 && killNum % 2 == 0;
+						
+						// Adjust thresholds for anti-spam
+						if (bAntiSpam)
+						{
+							// Don't play regular kill sounds for very low kill counts
+							if (killNum < g_iDoubleKillThreshold)
+							{
+								// Too soon for a sound
+								bCanPlaySound = false;
+							}
+							else if (killNum >= g_iMonsterkillThreshold)
+							{
+								// Monsterkill and higher
+								if (killNum >= g_iUltrakillThreshold)
+								{
+									// Ultrakill
+									bOver = true;
+									killNum = g_iUltrakillThreshold;
+									currentCategory = CATEGORY_KILLSTREAK_LONG;
+								}
+								else if (killNum >= g_iMonsterkillThreshold)
+								{
+									// Monsterkill
+									bOver = true;
+									killNum = g_iMonsterkillThreshold;
+									currentCategory = CATEGORY_KILLSTREAK_LONG;
+								}
+							}
+							else if (killNum >= g_iGodlikeThreshold)
+							{
+								// Godlike
+								bOver = true;
+								killNum = g_iGodlikeThreshold;
+								currentCategory = CATEGORY_KILLSTREAK_LONG;
+							}
+							else if (killNum >= g_iUnstoppableThreshold)
+							{
+								// Unstoppable
+								bOver = true;
+								killNum = g_iUnstoppableThreshold;
+								currentCategory = CATEGORY_KILLSTREAK_LONG;
+							}
+							else if (killNum >= g_iDominatingThreshold)
+							{
+								// Dominating
+								bOver = true;
+								killNum = g_iDominatingThreshold;
+								currentCategory = CATEGORY_KILLSTREAK_LONG;
+							}
+							else if (killNum >= g_iKillingSpreeThreshold)
+							{
+								// Killing Spree
+								bOver = true;
+								killNum = g_iKillingSpreeThreshold;
+								currentCategory = CATEGORY_KILLSTREAK_SHORT;
+							}
+							else if (killNum == g_iMegaKillThreshold)
+							{
+								// Mega-Kill
+								bOver = true;
+								currentCategory = CATEGORY_KILLSTREAK_SHORT;
+							}
+							else if (killNum == g_iMultiKillThreshold)
+							{
+								// Multi-Kill
+								bOver = true;
+								currentCategory = CATEGORY_KILLSTREAK_SHORT;
+							}
+							else if (killNum == g_iTripleKillThreshold)
+							{
+								// Triple Kill
+								bOver = true;
+								currentCategory = CATEGORY_KILLSTREAK_SHORT;
+							}
+							else if (killNum == g_iDoubleKillThreshold)
+							{
+								// Double Kill
+								bOver = true;
+								currentCategory = CATEGORY_KILLSTREAK_SHORT;
+							}
+						}
+						
+						if (bOver)
+						{
+							killNum = PickRandomSoundValue();
+							if (killNum >= MAX_NUM_KILLS)
+							{
+								killNum = MAX_NUM_KILLS - 1;
+							}
+							sKillSound = killSound[soundPreset][killNum];
+						}
+
+						if (iConsecutiveKills < MAX_NUM_KILLS && strcmp(sKillSound, "", false) != 0 && bCanPlaySound && 
+							((iKillConfig & 1) || ((iKillConfig & 2) && attackerClient == i) || ((iKillConfig & 4) && victimClient == i) || bOver))
+						{
+							EmitSoundCustom(i, sKillSound, _, _, _, _, g_fVolume * g_fClientVolume[i]);
+							bSoundPlayed = true;
+						}
+
+						if (g_iShowText[i] && g_iConsecutiveKills[attackerClient] < MAX_NUM_KILLS && ((iKillConfig & 8) || ((iKillConfig & 16) && attackerClient == i) || ((iKillConfig & 32) && victimClient == i) || bOver))
+						{
+							Format(sBuffer, sizeof(sBuffer), "killsound %i", killNum);
+							PrintCenterText(i, "%t", sBuffer, attackerName);
+						}
+					}
+					
+					// Update cooldown timers if a sound was played
+					if (bSoundPlayed && bAntiSpam)
+					{
+						g_fLastSoundTime[i] = fCurrentTime;
+						
+						switch (currentCategory)
+						{
+							case CATEGORY_HEADSHOT:
+								g_fLastHeadshotTime[i] = fCurrentTime;
+							case CATEGORY_KILLSTREAK_SHORT, CATEGORY_KILLSTREAK_LONG:
+								g_fLastKillStreakTime[i] = fCurrentTime;
+							case CATEGORY_SPECIAL:
+								g_fLastSpecialTime[i] = fCurrentTime;
+						}
+						
+						g_iLastSoundCategory[i] = currentCategory;
 					}
 				}
 			}
@@ -1495,4 +1887,43 @@ stock int PickRandomSoundValue()
 	}
 	
 	return iRandom;
+}
+
+public void ResetPlayerStats(int client)
+{
+	g_iConsecutiveKills[client] = 0;
+	g_iComboScore[client] = 0;
+	g_iConsecutiveHeadshots[client] = 0;
+	g_fLastKillTime[client] = -1.0;
+	g_fLastSoundTime[client] = 0.0;
+	g_fLastHeadshotTime[client] = 0.0;
+	g_fLastKillStreakTime[client] = 0.0;
+	g_fLastSpecialTime[client] = 0.0;
+	g_iLastSoundCategory[client] = CATEGORY_NONE;
+}
+
+void GetStreakName(int kills, char[] buffer, int maxlen)
+{
+	if (kills >= g_iUltrakillThreshold)
+		Format(buffer, maxlen, "ULTRAKILL!");
+	else if (kills >= g_iMonsterkillThreshold)
+		Format(buffer, maxlen, "MONSTERKILL!");
+	else if (kills >= g_iGodlikeThreshold)
+		Format(buffer, maxlen, "GODLIKE!");
+	else if (kills >= g_iUnstoppableThreshold)
+		Format(buffer, maxlen, "UNSTOPPABLE!");
+	else if (kills >= g_iDominatingThreshold)
+		Format(buffer, maxlen, "DOMINATING!");
+	else if (kills >= g_iKillingSpreeThreshold)
+		Format(buffer, maxlen, "KILLING SPREE");
+	else if (kills >= g_iMegaKillThreshold)
+		Format(buffer, maxlen, "MEGA-KILL");
+	else if (kills >= g_iMultiKillThreshold)
+		Format(buffer, maxlen, "MULTI-KILL");
+	else if (kills >= g_iTripleKillThreshold)
+		Format(buffer, maxlen, "TRIPLE KILL");
+	else if (kills >= g_iDoubleKillThreshold)
+		Format(buffer, maxlen, "DOUBLE KILL");
+	else
+		Format(buffer, maxlen, "None");
 }

@@ -34,7 +34,7 @@ public Plugin myinfo = {
 	name = "Quake Sounds",
 	author = "Spartan_C001, maxime1907, .Rushaway, +SyntX",
 	description = "Plays sounds based on events that happen in game.",
-	version = "4.2.3",
+	version = "4.2.4",
 	url = "http://steamcommunity.com/id/spartan_c001/",
 }
 
@@ -100,6 +100,16 @@ float g_fHeadshotCooldown = 0.5;
 float g_fKillStreakCooldown = 1.0;
 float g_fSpecialCooldown = 2.0;
 float g_fGeneralCooldown = 0.3;  // Minimum time between any sounds
+bool g_bSoundPlaying[MAXPLAYERS+1];
+bool g_bGlobalSoundPlaying;
+Handle g_hSoundTimer[MAXPLAYERS+1];
+Handle g_hGlobalSoundTimer;
+char g_sCurrentSound[MAXPLAYERS+1][PLATFORM_MAX_PATH];
+char g_sCurrentGlobalSound[PLATFORM_MAX_PATH];
+float g_fSoundDuration[MAXPLAYERS+1];
+float g_fSoundStartTime[MAXPLAYERS+1];
+float g_fGlobalSoundStartTime;
+float g_fSoundCooldown = 5.0;
 
 // Preferences
 Handle g_hQuakeSettings = INVALID_HANDLE;
@@ -123,11 +133,42 @@ ConVar g_cvar_UltrakillThreshold;
 ConVar g_cvar_HeadshotCooldown;          
 ConVar g_cvar_KillStreakCooldown;        
 ConVar g_cvar_SpecialCooldown;        
-ConVar g_cvar_GeneralCooldown;         
+ConVar g_cvar_GeneralCooldown;      
+ConVar g_cvar_SoundQueueMode;
+ConVar g_cvar_SoundBroadcastMode;
+ConVar g_cvar_SoundCooldown;   
 
 EngineVersion g_evGameEngine;
 
 bool g_bLate = false;
+
+enum struct SoundDurationInfo
+{
+    char pattern[32];
+    float duration;
+}
+
+SoundDurationInfo g_SoundDurations[] = {
+    {"monsterkill", 4.5},
+    {"ultrakill", 4.0},
+    {"godlike", 3.8},
+    {"unstoppable", 3.5},
+    {"dominating", 3.2},
+    {"killingspree", 3.0},
+    {"firstblood", 2.5},
+    {"headshot", 1.8},
+    {"doublekill", 2.2},
+    {"triplekill", 2.4},
+    {"multikill", 2.6},
+    {"megakill", 2.8},
+    {"combo", 2.0},
+    {"grenade", 2.0},
+    {"knife", 2.0},
+    {"selfkill", 2.0},
+    {"teamkill", 2.0},
+    {"round", 3.0},
+    {"join", 2.0}
+};
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
@@ -157,6 +198,9 @@ public void OnPluginStart()
 	g_cvar_KillStreakCooldown = CreateConVar("sm_quakesounds_killstreak_cooldown", "1.0", "Cooldown in seconds between kill streak sounds (double/triple kill)", FCVAR_NONE, true, 0.1, true, 5.0);
 	g_cvar_SpecialCooldown = CreateConVar("sm_quakesounds_special_cooldown", "2.0", "Cooldown in seconds between special sounds (grenade/knife/first blood)", FCVAR_NONE, true, 0.1, true, 5.0);
 	g_cvar_GeneralCooldown = CreateConVar("sm_quakesounds_general_cooldown", "0.3", "Minimum time in seconds between any quake sounds", FCVAR_NONE, true, 0.1, true, 5.0);
+	g_cvar_SoundQueueMode = CreateConVar("sm_quakesounds_queue_mode", "1", "Sound queue mode: 0=Cooldown-based (old method), 1=Duration-based (wait for sound to finish + cooldown)", FCVAR_NONE, true, 0.0, true, 1.0);
+    g_cvar_SoundBroadcastMode = CreateConVar("sm_quakesounds_broadcast_mode", "0", "Sound broadcast mode: 0=Play to individual clients only, 1=Broadcast to all clients (global sounds)", FCVAR_NONE, true, 0.0, true, 1.0);
+    g_cvar_SoundCooldown = CreateConVar("sm_quakesounds_sound_cooldown", "5.0", "Cooldown in seconds between sounds when using queue mode (after sound finishes playing)", FCVAR_NONE, true, 0.0, true, 30.0);
 
 	g_hQuakeSettings = RegClientCookie("quakesounds_settings", "Quake Sounds Settings", CookieAccess_Private);
 
@@ -196,11 +240,26 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
-	LoadQuakeSetConfig();
-	if (g_evGameEngine == Engine_HL2DM)
-	{
-		InitializeRound();
-	}
+    LoadQuakeSetConfig();
+    if (g_evGameEngine == Engine_HL2DM)
+    {
+        InitializeRound();
+    }
+    
+    g_bGlobalSoundPlaying = false;
+    g_sCurrentGlobalSound[0] = '\0';
+    g_fGlobalSoundStartTime = 0.0;
+    
+    if (g_hGlobalSoundTimer != INVALID_HANDLE)
+    {
+        KillTimer(g_hGlobalSoundTimer);
+        g_hGlobalSoundTimer = INVALID_HANDLE;
+    }
+    
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        ResetSoundStates(i);
+    }
 }
 
 public void OnConfigsExecuted()
@@ -212,6 +271,7 @@ public void OnConfigsExecuted()
 	g_fKillStreakCooldown = g_cvar_KillStreakCooldown.FloatValue;
 	g_fSpecialCooldown = g_cvar_SpecialCooldown.FloatValue;
 	g_fGeneralCooldown = g_cvar_GeneralCooldown.FloatValue;
+	g_fSoundCooldown = g_cvar_SoundCooldown.FloatValue;
 	g_iKillingSpreeThreshold = 15;
 	g_iDominatingThreshold = 20;
 	g_iUnstoppableThreshold = 35;
@@ -219,6 +279,11 @@ public void OnConfigsExecuted()
 	
 	LogMessage("[Quake Sounds] Anti-spam thresholds loaded: Monsterkill=%d, Ultrakill=%d", 
 		g_iMonsterkillThreshold, g_iUltrakillThreshold);
+}
+
+public void OnClientDisconnect(int client)
+{
+    ResetSoundStates(client);
 }
 
 public void OnClientPostAdminCheck(int client)
@@ -1780,9 +1845,74 @@ stock void PrecacheSoundCustom(char[] soundFile, int maxLength)
 // Custom EmitSound to allow compatibility with all game engines
 stock void EmitSoundCustom(int client, const char[] sound, int entity=SOUND_FROM_PLAYER, int channel=SNDCHAN_AUTO, int level=SNDLEVEL_NORMAL, int flags=SND_NOFLAGS, float volume=SNDVOL_NORMAL, int pitch=SNDPITCH_NORMAL, int speakerentity=-1, const float origin[3]=NULL_VECTOR, const float dir[3]=NULL_VECTOR, bool updatePos=true, float soundtime=0.0)
 {
-	int iClients[1];
-	iClients[0] = client;
-	EmitSound(iClients, 1, sound, entity, channel, level, flags, volume, pitch, speakerentity, origin, dir, updatePos, soundtime);
+    bool broadcastMode = g_cvar_SoundBroadcastMode.BoolValue;
+    float currentTime = GetEngineTime();
+    
+    if (broadcastMode)
+    {
+        if (g_bGlobalSoundPlaying)
+        {
+            PrintToServer("[Quake Sounds] Global sound already playing, skipping: %s", sound);
+            return;
+        }
+        
+        int[] clients = new int[MaxClients];
+        int numClients = 0;
+        
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (IsClientInGame(i) && !IsFakeClient(i) && g_iSound[i])
+            {
+                clients[numClients++] = i;
+            }
+        }
+        
+        if (numClients > 0)
+        {
+            g_bGlobalSoundPlaying = true;
+            strcopy(g_sCurrentGlobalSound, PLATFORM_MAX_PATH, sound);
+            g_fGlobalSoundStartTime = currentTime;
+            float duration = GetDurationOfSounds(sound);
+            EmitSound(clients, numClients, sound, entity, channel, level, flags, volume, pitch, speakerentity, origin, dir, updatePos, soundtime);
+            if (g_hGlobalSoundTimer != INVALID_HANDLE)
+            {
+                KillTimer(g_hGlobalSoundTimer);
+                g_hGlobalSoundTimer = INVALID_HANDLE;
+            }
+            g_hGlobalSoundTimer = CreateTimer(duration + g_fSoundCooldown, Timer_SoundFinished, 0, TIMER_FLAG_NO_MAPCHANGE);
+            
+            PrintToServer("[Quake Sounds] Playing global sound: %s (duration: %.1fs + cooldown: %.1fs = total: %.1fs)", 
+                sound, duration, g_fSoundCooldown, duration + g_fSoundCooldown);
+        }
+    }
+    else
+    {
+        if (client < 1 || client > MaxClients)
+            return;
+            
+        if (g_bSoundPlaying[client])
+        {
+            PrintToServer("[Quake Sounds] Client %d already has a sound playing, skipping: %s", client, sound);
+            return;
+        }
+        g_bSoundPlaying[client] = true;
+        strcopy(g_sCurrentSound[client], PLATFORM_MAX_PATH, sound);
+        g_fSoundStartTime[client] = currentTime;
+        float duration = GetDurationOfSounds(sound);
+        g_fSoundDuration[client] = duration;
+        int iClients[1];
+        iClients[0] = client;
+        EmitSound(iClients, 1, sound, entity, channel, level, flags, volume, pitch, speakerentity, origin, dir, updatePos, soundtime);
+        if (g_hSoundTimer[client] != INVALID_HANDLE)
+        {
+            KillTimer(g_hSoundTimer[client]);
+            g_hSoundTimer[client] = INVALID_HANDLE;
+        }
+        g_hSoundTimer[client] = CreateTimer(duration + g_fSoundCooldown, Timer_SoundFinished, client, TIMER_FLAG_NO_MAPCHANGE);
+        
+        PrintToServer("[Quake Sounds] Playing sound for client %d: %s (duration: %.1fs + cooldown: %.1fs = total: %.1fs)", 
+            client, sound, duration, g_fSoundCooldown, duration + g_fSoundCooldown);
+    }
 }
 
 public void ReadClientCookies(int client)
@@ -1834,6 +1964,96 @@ public void ReadClientCookies(int client)
 			SelectPresetForGender(client);
 		}
 	}
+}
+
+float GetDurationOfSounds(const char[] soundPath)
+{
+    char lowerSound[PLATFORM_MAX_PATH];
+    strcopy(lowerSound, sizeof(lowerSound), soundPath);
+    StringToLower(lowerSound);
+    
+    for (int i = 0; i < sizeof(g_SoundDurations); i++)
+    {
+        if (StrContains(lowerSound, g_SoundDurations[i].pattern, false) != -1)
+        {
+            return g_SoundDurations[i].duration;
+        }
+    }
+    
+    if (StrContains(lowerSound, ".mp3", false) != -1 || StrContains(lowerSound, ".wav", false) != -1)
+    {
+        return 2.5;
+    }
+    
+    return 2.0;
+}
+
+void StringToLower(char[] str)
+{
+    for (int i = 0; str[i] != '\0'; i++)
+    {
+        str[i] = CharToLower(str[i]);
+    }
+}
+
+bool CanPlaySound(int client, SoundCategory category)
+{
+    bool queueMode = g_cvar_SoundQueueMode.BoolValue;
+    bool broadcastMode = g_cvar_SoundBroadcastMode.BoolValue;
+    
+    if (queueMode)
+    {
+        if (broadcastMode)
+        {
+            return !g_bGlobalSoundPlaying;
+        }
+        else
+        {
+            return !g_bSoundPlaying[client];
+        }
+    }
+    else
+    {
+        float fCurrentTime = GetEngineTime();
+        if (fCurrentTime - g_fLastSoundTime[client] < g_fGeneralCooldown)
+            return false;
+        switch (category)
+        {
+            case CATEGORY_HEADSHOT:
+                if (fCurrentTime - g_fLastHeadshotTime[client] < g_fHeadshotCooldown)
+                    return false;
+            case CATEGORY_KILLSTREAK_SHORT, CATEGORY_KILLSTREAK_LONG:
+                if (fCurrentTime - g_fLastKillStreakTime[client] < g_fKillStreakCooldown)
+                    return false;
+            case CATEGORY_SPECIAL:
+                if (fCurrentTime - g_fLastSpecialTime[client] < g_fSpecialCooldown)
+                    return false;
+        }
+        
+        return true;
+    }
+}
+
+public Action Timer_SoundFinished(Handle timer, int client)
+{
+    if (client == 0) // Global sound
+    {
+        g_bGlobalSoundPlaying = false;
+        g_sCurrentGlobalSound[0] = '\0';
+        g_fGlobalSoundStartTime = 0.0;
+        g_hGlobalSoundTimer = INVALID_HANDLE;
+        PrintToServer("[Quake Sounds] Global sound finished, ready for next sound");
+    }
+    else if (client > 0 && client <= MaxClients)
+    {
+        g_bSoundPlaying[client] = false;
+        g_sCurrentSound[client][0] = '\0';
+        g_fSoundDuration[client] = 0.0;
+        g_fSoundStartTime[client] = 0.0;
+        g_hSoundTimer[client] = INVALID_HANDLE;
+        PrintToServer("[Quake Sounds] Sound finished for client %d, ready for next sound", client);
+    }
+    return Plugin_Stop;
 }
 
 public void SaveClientCookies(int client)
@@ -1891,15 +2111,45 @@ stock int PickRandomSoundValue()
 
 public void ResetPlayerStats(int client)
 {
-	g_iConsecutiveKills[client] = 0;
-	g_iComboScore[client] = 0;
-	g_iConsecutiveHeadshots[client] = 0;
-	g_fLastKillTime[client] = -1.0;
-	g_fLastSoundTime[client] = 0.0;
-	g_fLastHeadshotTime[client] = 0.0;
-	g_fLastKillStreakTime[client] = 0.0;
-	g_fLastSpecialTime[client] = 0.0;
-	g_iLastSoundCategory[client] = CATEGORY_NONE;
+    g_iConsecutiveKills[client] = 0;
+    g_iComboScore[client] = 0;
+    g_iConsecutiveHeadshots[client] = 0;
+    g_fLastKillTime[client] = -1.0;
+    g_fLastSoundTime[client] = 0.0;
+    g_fLastHeadshotTime[client] = 0.0;
+    g_fLastKillStreakTime[client] = 0.0;
+    g_fLastSpecialTime[client] = 0.0;
+    g_iLastSoundCategory[client] = CATEGORY_NONE;
+    ResetSoundStates(client);
+}
+
+public void ResetSoundStates(int client)
+{
+    if (client == 0)
+    {
+        g_bGlobalSoundPlaying = false;
+        g_sCurrentGlobalSound[0] = '\0';
+        g_fGlobalSoundStartTime = 0.0;
+        
+        if (g_hGlobalSoundTimer != INVALID_HANDLE)
+        {
+            KillTimer(g_hGlobalSoundTimer);
+            g_hGlobalSoundTimer = INVALID_HANDLE;
+        }
+    }
+    else if (client > 0 && client <= MaxClients)
+    {
+        g_bSoundPlaying[client] = false;
+        g_sCurrentSound[client][0] = '\0';
+        g_fSoundDuration[client] = 0.0;
+        g_fSoundStartTime[client] = 0.0;
+        
+        if (g_hSoundTimer[client] != INVALID_HANDLE)
+        {
+            KillTimer(g_hSoundTimer[client]);
+            g_hSoundTimer[client] = INVALID_HANDLE;
+        }
+    }
 }
 
 void GetStreakName(int kills, char[] buffer, int maxlen)

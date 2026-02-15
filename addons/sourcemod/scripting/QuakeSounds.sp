@@ -252,7 +252,10 @@ public void OnMapStart()
     
     if (g_hGlobalSoundTimer != INVALID_HANDLE)
     {
-        KillTimer(g_hGlobalSoundTimer);
+        if (IsValidHandle(g_hGlobalSoundTimer))
+        {
+            KillTimer(g_hGlobalSoundTimer);
+        }
         g_hGlobalSoundTimer = INVALID_HANDLE;
     }
     
@@ -1874,11 +1877,16 @@ stock void EmitSoundCustom(int client, const char[] sound, int entity=SOUND_FROM
             g_fGlobalSoundStartTime = currentTime;
             float duration = GetDurationOfSounds(sound);
             EmitSound(clients, numClients, sound, entity, channel, level, flags, volume, pitch, speakerentity, origin, dir, updatePos, soundtime);
+            
             if (g_hGlobalSoundTimer != INVALID_HANDLE)
             {
-                KillTimer(g_hGlobalSoundTimer);
+                if (IsValidHandle(g_hGlobalSoundTimer))
+                {
+                    KillTimer(g_hGlobalSoundTimer);
+                }
                 g_hGlobalSoundTimer = INVALID_HANDLE;
             }
+            
             g_hGlobalSoundTimer = CreateTimer(duration + g_fSoundCooldown, Timer_SoundFinished, 0, TIMER_FLAG_NO_MAPCHANGE);
             
             PrintToServer("[Quake Sounds] Playing global sound: %s (duration: %.1fs + cooldown: %.1fs = total: %.1fs)", 
@@ -1895,6 +1903,7 @@ stock void EmitSoundCustom(int client, const char[] sound, int entity=SOUND_FROM
             PrintToServer("[Quake Sounds] Client %d already has a sound playing, skipping: %s", client, sound);
             return;
         }
+        
         g_bSoundPlaying[client] = true;
         strcopy(g_sCurrentSound[client], PLATFORM_MAX_PATH, sound);
         g_fSoundStartTime[client] = currentTime;
@@ -1903,11 +1912,16 @@ stock void EmitSoundCustom(int client, const char[] sound, int entity=SOUND_FROM
         int iClients[1];
         iClients[0] = client;
         EmitSound(iClients, 1, sound, entity, channel, level, flags, volume, pitch, speakerentity, origin, dir, updatePos, soundtime);
+        
         if (g_hSoundTimer[client] != INVALID_HANDLE)
         {
-            KillTimer(g_hSoundTimer[client]);
+            if (IsValidHandle(g_hSoundTimer[client]))
+            {
+                KillTimer(g_hSoundTimer[client]);
+            }
             g_hSoundTimer[client] = INVALID_HANDLE;
         }
+        
         g_hSoundTimer[client] = CreateTimer(duration + g_fSoundCooldown, Timer_SoundFinished, client, TIMER_FLAG_NO_MAPCHANGE);
         
         PrintToServer("[Quake Sounds] Playing sound for client %d: %s (duration: %.1fs + cooldown: %.1fs = total: %.1fs)", 
@@ -2133,7 +2147,10 @@ public void ResetSoundStates(int client)
         
         if (g_hGlobalSoundTimer != INVALID_HANDLE)
         {
-            KillTimer(g_hGlobalSoundTimer);
+            if (IsValidHandle(g_hGlobalSoundTimer))
+            {
+                KillTimer(g_hGlobalSoundTimer);
+            }
             g_hGlobalSoundTimer = INVALID_HANDLE;
         }
     }
@@ -2146,7 +2163,10 @@ public void ResetSoundStates(int client)
         
         if (g_hSoundTimer[client] != INVALID_HANDLE)
         {
-            KillTimer(g_hSoundTimer[client]);
+            if (IsValidHandle(g_hSoundTimer[client]))
+            {
+                KillTimer(g_hSoundTimer[client]);
+            }
             g_hSoundTimer[client] = INVALID_HANDLE;
         }
     }

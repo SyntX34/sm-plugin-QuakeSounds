@@ -1934,7 +1934,7 @@ public void ReadClientCookies(int client)
 	char sValue[128];
 	GetClientCookie(client, g_hQuakeSettings, sValue, sizeof(sValue));
 	
-	if (strlen(sValue) >= 5) // Format is "0|0|0|1.0|0"
+	if (strlen(sValue) >= 5)
 	{
 		char sParts[5][16];
 		int numParts = ExplodeString(sValue, "|", sParts, sizeof(sParts), sizeof(sParts[]));
@@ -1946,8 +1946,15 @@ public void ReadClientCookies(int client)
 			g_iSound[client] = StringToInt(sParts[1]);
 		}
 		if (numParts >= 3) {
-			int preset = StringToInt(sParts[2]);
-			g_iSoundPreset[client] = (preset >= 0 && preset < g_iNumSets) ? preset : 0;
+			g_iSoundPreset[client] = 0;
+			for (int i = 0; i < g_iNumSets; i++)
+			{
+				if (StrEqual(g_sSetsName[i], sParts[2], false))
+				{
+					g_iSoundPreset[client] = i;
+					break;
+				}
+			}
 		}
 		if (numParts >= 4) {
 			float volume = StringToFloat(sParts[3]);
@@ -2075,11 +2082,15 @@ public void SaveClientCookies(int client)
 	if (!AreClientCookiesCached(client) || IsFakeClient(client))
 		return;
 
-	char sValue[128];
-	Format(sValue, sizeof(sValue), "%d|%d|%d|%.2f|%d", 
+	char sPresetName[PLATFORM_MAX_PATH];
+	if (g_iSoundPreset[client] >= 0 && g_iSoundPreset[client] < g_iNumSets)
+		strcopy(sPresetName, sizeof(sPresetName), g_sSetsName[g_iSoundPreset[client]]);
+
+	char sValue[256];
+	Format(sValue, sizeof(sValue), "%d|%d|%s|%.2f|%d", 
 		g_iShowText[client], 
 		g_iSound[client], 
-		g_iSoundPreset[client], 
+		sPresetName, 
 		g_fClientVolume[client],
 		g_iVoiceGender[client]);
 	SetClientCookie(client, g_hQuakeSettings, sValue);

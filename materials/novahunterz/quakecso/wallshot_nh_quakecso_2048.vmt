@@ -1,0 +1,6 @@
+"UnlitGeneric"
+{
+	"$basetexture" "novahunterz/quakecso/wallshot_nh_quakecso_2048"
+	"$nolod" 1
+	"$translucent" 1
+}

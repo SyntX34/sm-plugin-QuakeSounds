@@ -176,6 +176,10 @@ NotifyMode g_iNotifyMode[MAXPLAYERS + 1];
 int g_iSound[MAXPLAYERS + 1] = {0, ...}, g_iSoundPreset[MAXPLAYERS + 1] = {0, ...};
 float g_fClientVolume[MAXPLAYERS + 1] = {1.0, ...};
 
+float g_fLastAssistTime[MAXPLAYERS+1];
+const float ASSIST_SOUND_COOLDOWN = 10.0;
+int g_iLastKillStreakIndex[MAXPLAYERS+1];
+
 ConVar g_cvar_Announce;
 ConVar g_cvar_Text;
 ConVar g_cvar_Sound;
@@ -526,7 +530,6 @@ public void DisplayCookieMenu(int client)
 	Format(sBuffer, sizeof(sBuffer), "%T\n ", "quake menu", client);
 	SetMenuTitle(menu, sBuffer);
 
-	// Notification mode toggle
 	char notifyLabel[64];
 	switch (g_iNotifyMode[client])
 	{
@@ -536,11 +539,9 @@ public void DisplayCookieMenu(int client)
 	}
 	AddMenuItem(menu, "text pref", notifyLabel);
 
-	// Sound toggle
 	Format(sBuffer, sizeof(sBuffer), "%T",  g_iSound[client] ? "sounds disable" : "sounds enable", client);
 	AddMenuItem(menu, "no sounds", sBuffer);
 
-	// Volume
 	Format(sBuffer, sizeof(sBuffer), "%T: %.0f%%", "volume", client, g_fClientVolume[client] * 100);
 	AddMenuItem(menu, "volume", sBuffer);
 
@@ -1860,7 +1861,10 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 
 						if (requiredCooldown > 0.0 && fCurrentTime - lastCategoryTime < requiredCooldown)
 						{
-							bCanPlaySound = false;
+							bool allowPreempt = false;
+							if ((quakeCategory == CATEGORY_KILLSTREAK_SHORT || quakeCategory == CATEGORY_KILLSTREAK_LONG) && (quakeKillIndex > g_iLastKillStreakIndex[i]))
+								allowPreempt = true;
+							if (!allowPreempt) bCanPlaySound = false;
 						}
 					}
 				}
@@ -1886,22 +1890,22 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 						PrintQuakeTextDelayed(i, displayText);
 					}
 				}
-					// Update cooldown timers if a sound was played
-					if (bSoundPlayed && bAntiSpam)
+				// Update cooldown timers if a sound was played
+				if (bSoundPlayed && bAntiSpam)
+				{
+					g_fLastSoundTime[i] = fCurrentTime;
+		
+					switch (quakeCategory)
 					{
-						g_fLastSoundTime[i] = fCurrentTime;
-						
-						switch (quakeCategory)
-						{
-							case CATEGORY_HEADSHOT:
-								g_fLastHeadshotTime[i] = fCurrentTime;
-							case CATEGORY_KILLSTREAK_SHORT, CATEGORY_KILLSTREAK_LONG:
-								g_fLastKillStreakTime[i] = fCurrentTime;
-							case CATEGORY_SPECIAL:
-								g_fLastSpecialTime[i] = fCurrentTime;
-						}
-						
-						g_iLastSoundCategory[i] = quakeCategory;
+						case CATEGORY_HEADSHOT:
+							g_fLastHeadshotTime[i] = fCurrentTime;
+						case CATEGORY_KILLSTREAK_SHORT, CATEGORY_KILLSTREAK_LONG:
+							g_fLastKillStreakTime[i] = fCurrentTime;
+						case CATEGORY_SPECIAL:
+							g_fLastSpecialTime[i] = fCurrentTime;
+					}
+
+					g_iLastSoundCategory[i] = quakeCategory;
 					}
 				}
 			}
@@ -1914,22 +1918,28 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 
 		if (assistConfig[soundPreset] > 0)
 		{
-			if (g_iSound[assister] && assistSound[soundPreset][0] != '\0')
+			float now = GetEngineTime();
+			if (now - g_fLastAssistTime[assister] >= ASSIST_SOUND_COOLDOWN)
 			{
-				EmitSoundCustom(assister, assistSound[soundPreset], _, _, _, _, g_fVolume * g_fClientVolume[assister]);
-			}
+				g_fLastAssistTime[assister] = now;
 
-			if (g_iNotifyMode[assister] == NOTIFY_OVERLAY)
-			{
-				ShowKillOverlay(assister, "assist_nh_quakecso_2048");
-			}
-			else if (g_iNotifyMode[assister] == NOTIFY_TEXT)
-			{
-				char assisterName[MAX_NAME_LENGTH];
-				GetClientName(assister, assisterName, sizeof(assisterName));
-				char assistText[128];
-				Format(assistText, sizeof(assistText), "%s got an assist!", assisterName);
-				PrintQuakeTextDelayed(assister, assistText);
+				if (g_iSound[assister] && assistSound[soundPreset][0] != '\0')
+				{
+					EmitSoundCustom(assister, assistSound[soundPreset], _, _, _, _, g_fVolume * g_fClientVolume[assister]);
+				}
+
+				if (g_iNotifyMode[assister] == NOTIFY_OVERLAY)
+				{
+					ShowKillOverlay(assister, "assist_nh_quakecso_2048");
+				}
+				else if (g_iNotifyMode[assister] == NOTIFY_TEXT)
+				{
+					char assisterName[MAX_NAME_LENGTH];
+					GetClientName(assister, assisterName, sizeof(assisterName));
+					char assistText[128];
+					Format(assistText, sizeof(assistText), "%s got an assist!", assisterName);
+					PrintQuakeTextDelayed(assister, assistText);
+				}
 			}
 		}
 	}
@@ -1938,10 +1948,12 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 	if (g_iConsecutiveKills[attackerClient] >= NH_ULTRAKILL_KILLS)
 	{
 		g_iConsecutiveKills[attackerClient] = 0;
+		g_iLastKillStreakIndex[attackerClient] = 0;
 	}
 
 	g_iConsecutiveKills[victimClient] = 0;
 	g_iConsecutiveHeadshots[victimClient] = 0;
+	g_iLastKillStreakIndex[victimClient] = 0;
 
 	return Plugin_Continue;
 }
@@ -2316,6 +2328,8 @@ public void ResetPlayerStats(int client)
     g_fLastKillStreakTime[client] = 0.0;
     g_fLastSpecialTime[client] = 0.0;
     g_iLastSoundCategory[client] = CATEGORY_NONE;
+    g_iLastKillStreakIndex[client] = 0;
+    g_fLastAssistTime[client] = -ASSIST_SOUND_COOLDOWN;
 	ClearAssistDamageForVictim(client);
 
 	for (int i = 1; i <= MaxClients; i++)

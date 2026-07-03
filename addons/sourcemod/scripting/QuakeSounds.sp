@@ -81,8 +81,8 @@ public Plugin myinfo = {
 	name = "Quake Sounds",
 	author = "Spartan_C001, maxime1907, .Rushaway, +SyntX, Denied",
 	description = "This version of Quakesounds are heavily modified for NH ZR",
-	version = "4.3.0",
-	url = "http://steamcommunity.com/id/spartan_c001/",
+	version = "4.3.1",
+	url = "https://novazombie.com/",
 }
 
 // Sound Sets
@@ -1613,6 +1613,7 @@ public Action Event_PlayerDeath(Handle event, const char[] name, bool dontBroadc
 		{
 			quakeEvent = NH_EVENT_HEADHUNTER;
 			quakeCategory = CATEGORY_HEADSHOT;
+			g_iConsecutiveHeadshots[attackerClient] = 0;
 		}
 		else if (jumpshot)
 		{
